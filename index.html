@@ -88,6 +88,7 @@ button:disabled{opacity:.45;cursor:default}
     <label class="s" for="yAdj"><span>上下</span><input id="yAdj" type="range" min="-0.4" max="0.4" step="0.01" value="0"></label>
   </div>
   <label class="t" for="armFront"><input id="armFront" type="checkbox" checked>手臂在禮服前</label>
+  <label class="t" for="bones"><input id="bones" type="checkbox" checked>顯示骨架點</label>
   <div class="btns">
     <button id="flipBtn" disabled>切換鏡頭</button>
     <button id="shotBtn" class="primary" disabled>拍照存檔</button>
@@ -107,7 +108,19 @@ const video = document.createElement("video");
 video.playsInline = true; video.muted = true; video.autoplay = true;
 video.setAttribute("playsinline",""); video.setAttribute("muted",""); video.className = "cam";
 $("stage").appendChild(video);   // iOS Safari 需要 video 在頁面上才會持續更新畫面
-const dress = new Image(); dress.src = DRESS_SRC; $("preview").src = DRESS_SRC;
+$("preview").src = DRESS_SRC;
+const dressImg = new Image();
+const dress = document.createElement("canvas");   // 預先解碼好的禮服，避免 Safari 畫不出 WebP
+const dressReady = new Promise((res, rej) => {
+  dressImg.onload = () => {
+    dress.width = dressImg.naturalWidth; dress.height = dressImg.naturalHeight;
+    dress.getContext("2d").drawImage(dressImg, 0, 0);
+    res();
+  };
+  dressImg.onerror = () => rej(new Error("dress"));
+});
+dressImg.src = DRESS_SRC;
+let diag = "";
 
 const maskCv = document.createElement("canvas"), maskCtx = maskCv.getContext("2d");
 const armCv = document.createElement("canvas"), armCtx = armCv.getContext("2d");
@@ -141,6 +154,7 @@ $("startBtn").addEventListener("click", async () => {
   try{
     if (!navigator.mediaDevices?.getUserMedia) throw new Error("nocam");
     setMsg("正在載入人體偵測模型…");
+    await dressReady;
     landmarker = landmarker || await loadModel();
     setMsg("正在開啟鏡頭…");
     await startCamera();
@@ -192,7 +206,8 @@ function drawDress(p){
   const wAdj = +$("wAdj").value, hAdj = +$("hAdj").value, sAdj = +$("sAdj").value, yAdj = +$("yAdj").value;
   const sh = mid(p.ls, p.rs);
   const sw = dist(p.ls, p.rs);
-  if (sw < 20) return null;
+  diag = `肩寬${Math.round(sw)} 畫面${out.width}×${out.height} 禮服${dress.width}×${dress.height}`;
+  if (!(sw >= 20) || !dress.width) return null;
   const [a, b] = p.ls.x < p.rs.x ? [p.ls, p.rs] : [p.rs, p.ls];
   const ang = Math.atan2(b.y-a.y, b.x-a.x);
   const hipOk = p.lh.v > 0.5 && p.rh.v > 0.5;
@@ -242,9 +257,27 @@ function drawArms(p, sw, mask){
   ctx.drawImage(armCv, 0, 0);
 }
 
+function drawBones(p){
+  ctx.fillStyle = "#d8282f"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+  for (const k of ["ls","rs","lh","rh","la","ra","le","re","lw","rw"]){
+    if (p[k].v < 0.3) continue;
+    ctx.beginPath(); ctx.arc(p[k].x, p[k].y, Math.max(6, out.width/120), 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  }
+}
+
 function loop(){
   if (!running) return;
-  if (video.readyState >= 2){
+  try { frame(); }
+  catch(err){ console.error(err); ctx.setTransform(1,0,0,1,0,0); $("status").hidden = false; $("status").textContent = "錯誤：" + (err?.message || err); }
+  requestAnimationFrame(loop);
+}
+
+function frame(){
+  if (video.readyState >= 2 && video.videoWidth){
+    if (out.width !== video.videoWidth || out.height !== video.videoHeight){
+      out.width = video.videoWidth; out.height = video.videoHeight;
+      armCv.width = out.width; armCv.height = out.height; smooth = null;
+    }
     const W = out.width, H = out.height;
     const mirror = facing === "user";
     ctx.save();
@@ -260,9 +293,13 @@ function loop(){
         const ok = p.ls.v > 0.5 && p.rs.v > 0.5;
         if (ok){
           const sw = drawDress(p);
-          if (sw && $("armFront").checked && res.segmentationMasks?.[0]) drawArms(p, sw, res.segmentationMasks[0]);
+          if (sw && $("armFront").checked && res.segmentationMasks?.[0]){
+            try { drawArms(p, sw, res.segmentationMasks[0]); }
+            catch(err){ console.error(err); $("armFront").checked = false; diag = "手臂合成失敗，已關閉"; }
+          }
+          if ($("bones").checked) drawBones(p);
         }
-        $("status").textContent = ok ? "已對準身體" : "請讓雙肩入鏡";
+        $("status").textContent = (ok ? "已對準身體" : "請讓雙肩入鏡") + ($("bones").checked ? `｜${diag}` : "");
         $("status").className = "status" + (ok ? " ok" : "");
       } else {
         smooth = null;
@@ -273,7 +310,6 @@ function loop(){
     }
     ctx.restore();
   }
-  requestAnimationFrame(loop);
 }
 </script>
 </body>
